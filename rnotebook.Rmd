@@ -776,20 +776,22 @@ numerado <- dados_treinamento %>%
     mutate(ind = cumsum(unitario))
 
 outros_precos <- numerado %>%
-    select(ind, starts_with("MMR")) %>% 
-    gather(tipo_preco, preco, -ind)
+    select(ind, IsBadBuy, starts_with("MMR")) %>% 
+    gather(tipo_preco, preco, -ind, - IsBadBuy)
 
 
 join <- numerado %>% 
     select(ind, VehBCost) %>% 
     inner_join(outros_precos, by = c("ind" = "ind")) %>% 
     mutate( diff = VehBCost / preco - 1 ) %>% 
-    filter(between(diff, -0.9, 2))
+    filter(between(diff, -0.9, 2)) %>% 
+    mutate(diffBadBuy = if_else(IsBadBuy == 1, diff, as.double(NA)), diffGoodBuy = if_else(IsBadBuy == 0, diff, as.double(NA)) )
     
 
 
 ggplot(join) +
-    geom_violin(aes(x = tipo_preco, y = diff )) +
+    geom_violin(aes(x = tipo_preco, y = diffBadBuy), color = "darkred", fill = "darkred", alpha = 0.7) +
+    geom_violin(aes(x = tipo_preco, y = diffGoodBuy), color = "darkgreen", fill = "darkgreen", alpha = 0.7 ) +
     coord_flip()
     
 
