@@ -1,0 +1,879 @@
+---
+title: "Trabalho de IA"
+params:
+  diretorio: C:\Temp\all
+  frac_treinamento: 0.75
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    echo: no
+    number_sections: yes
+    toc: yes
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(scales)
+library(rsample)
+library(tidyverse)
+library(caret)
+library(mlbench)
+library(caTools)
+```
+
+
+# Pré-processamento
+
+Essa seção mostra o trabalho de pré-processamento realizado
+
+## Divisão inicial da base
+
+A base é inicialmente dividida em Treinamento e Teste. Nenhuma decisão a respeito do modelo foi tomada com base nos dados contidos na base de teste, que foi deixada de lado durante todo o trabalho. A base de treinamento foi selecionada aleatoriamente e contém `r percent(params$frac_treinamento) ` dos dados.
+
+```{r DivideTreinamento, echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(42)
+dados_completos <- read_csv(paste( params$diretorio, "\\training.csv", sep = ""))
+split_inicial <- initial_split(dados_completos, prop = params$frac_treinamento)
+dados_treinamento <- training(split_inicial)
+dados_teste <- testing(split_inicial)
+"Dados teste"
+nrow(dados_teste)
+"Dados treinamento"
+nrow(dados_treinamento)
+```
+
+
+## Tratamento dos atributos
+
+```{r echo=FALSE}
+names(dados_treinamento)
+```
+
+RefID foi retirado por ser um campo de chave
+
+PurchDate também não é informativo, pois é a data do leilão e não tem a ver com as características do carro. Foi retirado
+
+```{r echo=FALSE}
+dados_treinamento <- dados_treinamento %>% 
+    select( -RefId, -PurchDate, -Transmission)
+dados_teste <- dados_teste %>% 
+    select( -RefId, - PurchDate, -Transmission )
+```
+
+
+Auction: provedor de leilões. Foi transformado em variáveis binárias "AUCTION_"
+
+
+```{r echo=FALSE}
+dados_treinamento <- dados_treinamento %>% 
+    mutate_if(is.character, as.factor) %>% 
+    mutate(unitario = 1)
+dados_teste <- dados_teste %>% 
+    mutate_if(is.character, as.factor) %>% 
+    mutate(unitario = 1)
+dados_treinamento %>% 
+    count(Auction)
+nlevels(dados_treinamento$Auction)
+ggplot(dados_treinamento, aes(x = IsBadBuy)) +
+    geom_bar(aes( y = ..prop..)) +
+    facet_wrap(~Auction)
+    
+dados_treinamento <- dados_treinamento %>% 
+    mutate(Auction = paste("AUCTION_",Auction, sep = "")) %>% 
+    spread(Auction, unitario, fill = 0)
+dados_teste <- dados_teste %>% 
+    mutate(Auction = paste("AUCTION_",Auction, sep = "")) %>% 
+    spread(Auction, unitario, fill = 0)
+```
+
+
+A variável de idade é informativa. Parece claro que há diferença.
+
+```{r}
+summary(dados_treinamento$VehicleAge)
+```
+
+
+
+```{r}
+ggplot(dados_treinamento, aes( y = VehicleAge, group = IsBadBuy, x = IsBadBuy )) +
+    geom_boxplot() 
+```
+
+
+Quanto aos fabricantes, juntamos os menores que 1% em "outros". As variáveis foram transformadas em binárias
+
+
+```{r}
+fabricantes = nlevels(dados_treinamento$Make)
+dados_treinamento %>% 
+    mutate(Make = fct_lump(Make, prop = 0.01, other_level = "OUTRA")) %>% 
+    group_by(Make) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(Make, perc_bad))) +
+        geom_col() +
+        coord_flip()
+```
+
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Make = fct_lump(Make, prop = 0.01, other_level = "OUTRA")) %>% 
+    mutate(Make = paste("MAKE_",Make, sep = "")) %>% 
+    spread(Make, unitario, fill = 0)
+dados_teste <- dados_teste %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Make = fct_lump(Make, prop = 0.01, other_level = "OUTRA")) %>% 
+    mutate(Make = paste("MAKE_",Make, sep = "")) %>% 
+    spread(Make, unitario, fill = 0)
+```
+
+O Modelo foi retirado porque é muito variado.
+
+Trim foi deixado, pois é transversão aos modelos. Mas só os Trims maiores que 5%
+
+
+```{r}
+dados_treinamento %>% 
+    mutate(Trim = fct_lump(Trim, prop = 0.05, other_level = "OUTRA")) %>% 
+    mutate(Trim = fct_explicit_na(Trim, "OUTRA")) %>% 
+    group_by(Trim) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(Trim, perc_bad))) +
+        geom_col() +
+        coord_flip()
+```
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Trim = fct_lump(Trim, prop = 0.05, other_level = "OUTRA")) %>% 
+    mutate(Trim = paste("TRIM_",Trim, sep = "")) %>% 
+    spread(Trim, unitario, fill = 0)
+dados_teste <- dados_teste %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Trim = fct_lump(Trim, prop = 0.05, other_level = "OUTRA")) %>% 
+    mutate(Trim = paste("TRIM_",Trim, sep = "")) %>% 
+    spread(Trim, unitario, fill = 0)
+```
+
+SubModel foi dividido em partes. 
+
+Abaixo o resultado do Tipo de Modelo, limpando as categorias com menos de 1%
+
+```{r}
+dados_treinamento <- dados_treinamento %>%
+    mutate(Tipo_Modelo = str_trim(str_remove(SubModel,"[0-9]D"))) %>% 
+    mutate(Tipo_Modelo = str_extract(Tipo_Modelo, "^([\\w\\-]+)")) 
+    
+dados_teste <- dados_teste  %>%
+    mutate(Tipo_Modelo = str_trim(str_remove(SubModel,"[0-9]D"))) %>% 
+    mutate(Tipo_Modelo = str_extract(Tipo_Modelo, "^([\\w\\-]+)")) 
+dados_treinamento %>% 
+    mutate(Tipo_Modelo = fct_lump(Tipo_Modelo , prop = 0.01, other_level = "OUTRO")) %>% 
+    mutate(Tipo_Modelo = fct_explicit_na(Tipo_Modelo, "OUTRA")) %>% 
+    group_by(Tipo_Modelo) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(Tipo_Modelo, perc_bad))) +
+        geom_col() +
+        coord_flip()
+    
+    
+```
+
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Tipo_Modelo = fct_lump(Tipo_Modelo, prop = 0.01, other_level = "OUTRO")) %>% 
+    mutate(Tipo_Modelo = paste("TIPOMODELO_",Tipo_Modelo, sep = "")) %>% 
+    spread(Tipo_Modelo, unitario, fill = 0)
+dados_teste  <- dados_teste  %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Tipo_Modelo = fct_lump(Tipo_Modelo, prop = 0.01, other_level = "OUTRO")) %>% 
+    mutate(Tipo_Modelo = paste("TIPOMODELO_",Tipo_Modelo, sep = "")) %>% 
+    spread(Tipo_Modelo, unitario, fill = 0)
+```
+
+
+O número de portas também foi separado. Foi mantido como variável categórica porque não a relação entre as grandezas não parece fazer sentido
+
+
+
+```{r}
+dados_treinamento %>% 
+    mutate(Portas = str_extract(SubModel, "[0-9]D")) %>% 
+    mutate(Portas = str_extract(SubModel, "[0-9]D")) %>% 
+    group_by(Portas ) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(Portas , perc_bad))) +
+        geom_col() +
+        coord_flip()
+    
+```
+
+
+Os veículos sem informação de portas foram incluídos 
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate(Portas = str_extract(SubModel, "[0-9]D")) %>% 
+    mutate(Portas = str_extract(SubModel, "[0-9]D")) %>% 
+    mutate(Portas = str_replace_na(Portas, replacement = "4D" )) %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Portas = paste("PORTAS_",Portas, sep = "")) %>% 
+    spread(Portas, unitario, fill = 0) %>% 
+    select(-Model, -SubModel)
+dados_teste <- dados_teste %>% 
+    mutate(Portas = str_extract(SubModel, "[0-9]D")) %>% 
+    mutate(Portas = str_extract(SubModel, "[0-9]D")) %>% 
+    mutate(Portas = str_replace_na(Portas, replacement = "4D" )) %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Portas = paste("PORTAS_",Portas, sep = "")) %>% 
+    spread(Portas, unitario, fill = 0) %>% 
+    select(-Model, -SubModel)
+```
+
+
+Cor. Carros dourados... 
+
+```{r}
+dados_treinamento %>% 
+    mutate(Color = fct_lump(Color, prop = 0.01, other_level = "OTHER")) %>% 
+    group_by(Color ) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(Color , perc_bad))) +
+        geom_col() +
+        coord_flip()
+dados_treinamento %>% 
+    count(Color, sort = TRUE)
+```
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Color = fct_lump(Color, prop = 0.01, other_level = "OTHER")) %>% 
+    mutate(Color = paste("COR_",Color, sep = "")) %>% 
+    spread(Color, unitario, fill = 0)
+dados_teste <- dados_teste %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Color = fct_lump(Color, prop = 0.01, other_level = "OTHER")) %>% 
+    mutate(Color = paste("COR_",Color, sep = "")) %>% 
+    spread(Color, unitario, fill = 0)
+```
+
+
+Tipo de roda. O fato de o tipo de roda não estar cadastrado diz algo sobre a característica do carro???
+
+```{r}
+dados_treinamento %>% 
+    group_by(WheelType  ) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(WheelType , perc_bad))) +
+        geom_col() +
+        coord_flip()
+```
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate(unitario = 1) %>% 
+    mutate(WheelType = paste("RODA_",WheelType, sep = "")) %>% 
+    spread(WheelType, unitario, fill = 0) %>% 
+    select (-WheelTypeID)
+dados_teste <- dados_teste  %>% 
+    mutate(unitario = 1) %>% 
+    mutate(WheelType = paste("RODA_",WheelType, sep = "")) %>% 
+    spread(WheelType, unitario, fill = 0) %>% 
+    select (-WheelTypeID)
+```
+
+
+Leitura do Odômetro
+
+```{r}
+ggplot(dados_treinamento, aes( y = VehOdo, group = IsBadBuy, x = IsBadBuy )) +
+    geom_boxplot() 
+```
+
+
+Nacionalidade
+
+
+```{r}
+dados_treinamento %>% 
+    mutate(Nationality = str_replace(Nationality, "NULL", "AMERICAN")) %>% 
+    group_by(Nationality  ) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(Nationality , perc_bad))) +
+        geom_col() +
+        coord_flip()
+```
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Nationality = str_replace(Nationality, "NULL", "AMERICAN")) %>% 
+    mutate(Nationality = paste("PAIS_",Nationality, sep = "")) %>% 
+    spread(Nationality, unitario, fill = 0) 
+dados_teste <- dados_teste  %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Nationality = str_replace(Nationality, "NULL", "AMERICAN")) %>% 
+    mutate(Nationality = paste("PAIS_",Nationality, sep = "")) %>% 
+    spread(Nationality, unitario, fill = 0) 
+```
+
+Tamanho
+
+```{r}
+dados_treinamento %>% 
+    mutate( Size  = str_replace(Size, "NULL", "MEDIUM")) %>% 
+    group_by(Size  ) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(Size , perc_bad))) +
+        geom_col() +
+        coord_flip()
+```
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate( Size  = str_replace(Size, "NULL", "MEDIUM")) %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Size = paste("TAMANHO_",Size, sep = "")) %>% 
+    spread(Size, unitario, fill = 0) 
+dados_teste <- dados_teste %>% 
+    mutate( Size  = str_replace(Size, "NULL", "MEDIUM")) %>% 
+    mutate(unitario = 1) %>% 
+    mutate(Size = paste("TAMANHO_",Size, sep = "")) %>% 
+    spread(Size, unitario, fill = 0) 
+```
+
+Se é de uma das três maiores marcas americanas
+
+
+```{r}
+dados_treinamento %>% 
+    mutate( TopThreeAmericanName  = str_replace(TopThreeAmericanName, "NULL", "OTHER")) %>% 
+    group_by(TopThreeAmericanName  ) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(TopThreeAmericanName , perc_bad))) +
+        geom_col() +
+        coord_flip()
+```
+
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate( TopThreeAmericanName  = str_replace(TopThreeAmericanName, "NULL", "OTHER")) %>% 
+    mutate(unitario = 1) %>% 
+    mutate(TopThreeAmericanName = paste("MARCATOP3_",TopThreeAmericanName, sep = "")) %>% 
+    spread(TopThreeAmericanName, unitario, fill = 0) 
+dados_teste <- dados_teste %>% 
+    mutate( TopThreeAmericanName  = str_replace(TopThreeAmericanName, "NULL", "OTHER")) %>% 
+    mutate(unitario = 1) %>% 
+    mutate(TopThreeAmericanName = paste("MARCATOP3_",TopThreeAmericanName, sep = "")) %>% 
+    spread(TopThreeAmericanName, unitario, fill = 0) 
+```
+
+Preço do carro na época da compra em médias condições
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate(
+        MMRAcquisitionAuctionAveragePrice = as.double(MMRAcquisitionAuctionAveragePrice),
+        MMRAcquisitionAuctionCleanPrice = as.double(MMRAcquisitionAuctionCleanPrice),
+        MMRAcquisitionRetailAveragePrice = as.double(MMRAcquisitionRetailAveragePrice),
+        MMRAcquisitonRetailCleanPrice = as.double(MMRAcquisitonRetailCleanPrice),
+        MMRCurrentAuctionAveragePrice = as.double(MMRCurrentAuctionAveragePrice),
+        MMRCurrentAuctionCleanPrice = as.double(MMRCurrentAuctionCleanPrice),
+        MMRCurrentRetailAveragePrice = as.double(MMRCurrentRetailAveragePrice),
+        MMRCurrentRetailCleanPrice = as.double(MMRCurrentRetailCleanPrice)
+    )
+dados_teste <- dados_teste %>% 
+    mutate(
+        MMRAcquisitionAuctionAveragePrice = as.double(MMRAcquisitionAuctionAveragePrice),
+        MMRAcquisitionAuctionCleanPrice = as.double(MMRAcquisitionAuctionCleanPrice),
+        MMRAcquisitionRetailAveragePrice = as.double(MMRAcquisitionRetailAveragePrice),
+        MMRAcquisitonRetailCleanPrice = as.double(MMRAcquisitonRetailCleanPrice),
+        MMRCurrentAuctionAveragePrice = as.double(MMRCurrentAuctionAveragePrice),
+        MMRCurrentAuctionCleanPrice = as.double(MMRCurrentAuctionCleanPrice),
+        MMRCurrentRetailAveragePrice = as.double(MMRCurrentRetailAveragePrice),
+        MMRCurrentRetailCleanPrice = as.double(MMRCurrentRetailCleanPrice)
+    )
+dados_treinamento %>% 
+    select(IsBadBuy, starts_with("MMR")) %>% 
+    gather(Tipo_Preco, Preco, -IsBadBuy) %>% 
+    ggplot(aes( y = Preco, group = IsBadBuy, x = IsBadBuy )) +
+        geom_boxplot() +
+        facet_wrap(~Tipo_Preco)  
+    
+```
+
+Verificando algumas diferenças de preço. 
+
+Esperava-se um padrão do tipo: diferenças grandes revelariam um tipo de carro suscetível a micos.
+
+Não incluídas na análise
+
+
+```{r}
+diferencas <- dados_treinamento  %>% 
+    mutate(diffCurrentAuctionRetail = MMRCurrentAuctionCleanPrice / MMRCurrentRetailCleanPrice - 1 ) %>%
+    mutate(diffCurrentAverageCleanAuction = MMRCurrentAuctionAveragePrice / MMRCurrentAuctionCleanPrice - 1  ) 
+ggplot(diferencas , aes( y = diffCurrentAuctionRetail, group = IsBadBuy, x = IsBadBuy )) +
+    geom_violin()
+    
+ggplot(diferencas , aes( y = diffCurrentAverageCleanAuction, group = IsBadBuy, x = IsBadBuy )) +
+    geom_violin()
+```
+
+
+PRIMEUNIT com muitos dados faltando. Excluído da análise
+
+
+```{r}
+dados_treinamento %>% 
+    count(PRIMEUNIT)
+```
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    select(-PRIMEUNIT)
+dados_teste <- dados_teste %>% 
+    select(-PRIMEUNIT)
+```
+
+Muito poucos dados para o tipo de garantia. Atributo retirado
+
+
+```{r}
+dados_treinamento %>% 
+    count(AUCGUART)
+```
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    select(-AUCGUART)
+dados_teste <- dados_teste %>% 
+    select(-AUCGUART)
+```
+
+
+Número do comprador. Muito variado. Atributo retirado
+
+
+```{r}
+dados_treinamento %>% 
+    count(BYRNO, sort = TRUE) 
+```
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    select(-BYRNO)
+dados_teste <- dados_teste %>% 
+    select(-BYRNO)
+```
+
+
+CEP. Muito variado. Atributo retirado
+
+
+```{r}
+dados_treinamento %>% 
+    count(VNZIP1, sort = TRUE)
+```
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    select(-VNZIP1)
+dados_teste <- dados_teste %>% 
+    select(-VNZIP1)
+```
+
+Estados
+
+
+```{r}
+dados_treinamento %>% 
+    mutate( VNST  = fct_lump(VNST, prop = 0.02, other_level = "OUTRO" )) %>% 
+    group_by(VNST  ) %>% 
+    summarise(perc_bad = mean(IsBadBuy), n()) %>% 
+    arrange( -perc_bad) %>% 
+    ggplot(aes(y = perc_bad, x = fct_reorder(VNST , perc_bad))) +
+        geom_col() +
+        coord_flip()
+```
+
+
+
+```{r}
+dados_treinamento <- dados_treinamento %>% 
+    mutate( VNST  = fct_lump(VNST, prop = 0.02, other_level = "OUTRO" )) %>% 
+    mutate(unitario = 1) %>% 
+    mutate(VNST = paste("ESTADO_",VNST, sep = "")) %>% 
+    spread(VNST, unitario, fill = 0) 
+
+dados_teste <- dados_teste %>% 
+    mutate( VNST  = fct_lump(VNST, prop = 0.02, other_level = "OUTRO" )) %>% 
+    mutate(unitario = 1) %>% 
+    mutate(VNST = paste("ESTADO_",VNST, sep = "")) %>% 
+    spread(VNST, unitario, fill = 0) 
+```
+
+
+
+
+
+```{r}
+numerado <- dados_treinamento %>% 
+    mutate(unitario = 1) %>%
+    mutate(ind = cumsum(unitario))
+
+outros_precos <- numerado %>%
+    select(ind, IsBadBuy, starts_with("MMR")) %>% 
+    gather(tipo_preco, preco, -ind, - IsBadBuy)
+
+join <- numerado %>% 
+    select(ind, VehBCost) %>% 
+    inner_join(outros_precos, by = c("ind" = "ind")) %>% 
+    mutate( diff = VehBCost / preco - 1 ) %>% 
+    filter(between(diff, -0.9, 2)) %>% 
+    mutate(diffBadBuy = if_else(IsBadBuy == 1, diff, as.double(NA)), diffGoodBuy = if_else(IsBadBuy == 0, diff, as.double(NA)) )
+    
+ggplot(join) +
+    geom_violin(aes(x = tipo_preco, y = diffBadBuy), color = "darkred", fill = "darkred", alpha = 0.7) +
+    geom_violin(aes(x = tipo_preco, y = diffGoodBuy), color = "darkgreen", fill = "darkgreen", alpha = 0.7 ) +
+    coord_flip()
+
+
+    
+```
+
+
+Foram mantidos os preços entre 1000 e 20000 
+
+
+
+
+```{r}
+
+ggplot(dados_treinamento ) +
+  geom_histogram(aes(x = VehBCost))
+
+dados_treinamento %>% 
+  select(VehBCost) %>% 
+  summary()
+
+
+```
+
+
+```{r}
+
+numerado <- dados_treinamento %>% 
+    mutate(unitario = 1) %>%
+    mutate(ind = cumsum(unitario))
+
+outros_precos <- numerado %>%
+    select(ind, IsBadBuy, starts_with("MMR")) %>% 
+    gather(tipo_preco, preco, -ind, - IsBadBuy)
+
+join <- numerado %>% 
+    select(ind, VehBCost) %>% 
+    inner_join(outros_precos, by = c("ind" = "ind")) %>% 
+    mutate( diff = VehBCost / preco - 1 ) %>% 
+    mutate( diff = if_else(between(diff, -0.9, 2),diff,as.double(NA))) %>% 
+    group_by(tipo_preco) %>% 
+    mutate(mediana_diff = median(diff, na.rm = TRUE)) %>% 
+    ungroup() %>% 
+    mutate(diff = if_else(is.na(diff), mediana_diff, diff) ) %>% 
+    mutate( 
+            VehBCost = if_else(between(VehBCost, 1000, 20000), as.double(VehBCost), as.double(NA)),
+            diff = if_else(between(VehBCost, 1000, 20000),  diff, mediana_diff)
+    ) %>% 
+    mutate( VehBCost = if_else(is.na(VehBCost), median(VehBCost, na.rm =  TRUE), VehBCost )   ) %>% 
+    group_by(tipo_preco) %>% 
+    mutate( diff = if_else(is.na(diff), median(diff,na.rm = TRUE), diff) ) %>% 
+    ungroup() %>% 
+    select(ind, VehBCost, diff, tipo_preco) %>% 
+    spread(tipo_preco, diff  ) %>% 
+    identity()
+
+dados_treinamento <- numerado %>% 
+  select(-VehBCost, -starts_with("MMR")) %>% 
+  left_join(join, by = c("ind"="ind")) %>% 
+  select (-ind, -unitario)
+
+
+numerado <- dados_teste %>% 
+    mutate(unitario = 1) %>%
+    mutate(ind = cumsum(unitario))
+
+outros_precos <- numerado %>%
+    select(ind, IsBadBuy, starts_with("MMR")) %>% 
+    gather(tipo_preco, preco, -ind, - IsBadBuy)
+
+join <- numerado %>% 
+    select(ind, VehBCost) %>% 
+    inner_join(outros_precos, by = c("ind" = "ind")) %>% 
+    mutate( diff = VehBCost / preco - 1 ) %>% 
+    mutate( diff = if_else(between(diff, -0.9, 2),diff,as.double(NA))) %>% 
+    group_by(tipo_preco) %>% 
+    mutate(mediana_diff = median(diff, na.rm = TRUE)) %>% 
+    ungroup() %>% 
+    mutate(diff = if_else(is.na(diff), mediana_diff, diff) ) %>% 
+    mutate( 
+            VehBCost = if_else(between(VehBCost, 1000, 20000), as.double(VehBCost), as.double(NA)),
+            diff = if_else(between(VehBCost, 1000, 20000),  diff, mediana_diff)
+    ) %>% 
+    mutate( VehBCost = if_else(is.na(VehBCost), median(VehBCost, na.rm =  TRUE), VehBCost )   ) %>% 
+    group_by(tipo_preco) %>% 
+    mutate( diff = if_else(is.na(diff), median(diff,na.rm = TRUE), diff) ) %>% 
+    ungroup() %>% 
+    select(ind, VehBCost, diff, tipo_preco) %>% 
+    spread(tipo_preco, diff  ) %>% 
+    identity()
+
+dados_teste <- numerado %>% 
+  select(-VehBCost, -starts_with("MMR")) %>% 
+  left_join(join, by = c("ind"="ind")) %>% 
+  select (-ind, -unitario)
+
+  
+
+
+
+
+```
+
+
+
+```{r}
+
+summary(dados_treinamento)
+
+
+```
+
+
+
+```{r}
+
+campos_treina <- as.tibble(names(dados_treinamento))
+
+campos_teste <- as.tibble(names(dados_teste))
+
+
+campos_teste %>% 
+  anti_join(campos_treina)
+
+campos_treina %>% 
+  anti_join(campos_teste)
+
+dados_treinamento <- dados_treinamento %>% 
+  mutate(IsBadBuy = if_else(IsBadBuy == 0, "Good", "Bad"))
+
+dados_teste <- dados_teste %>% 
+  mutate(IsBadBuy = if_else(IsBadBuy == 0, "Good", "Bad"))
+
+  
+
+
+```
+
+
+
+
+Primeira exploração
+
+```{r}
+
+dados_treinamento_num <- dados_treinamento %>% 
+  mutate(IsBadBuy = if_else(IsBadBuy == "Good", 0, 1)) 
+
+rows <- sample(nrow(dados_treinamento_num))
+dados_treinamento_sort <- dados_treinamento_num[rows, ]
+# Find row to split on
+split <- round(nrow(dados_treinamento_num) * .60)
+treino <- dados_treinamento_sort[1:split, ]
+teste <- dados_treinamento_sort[(split + 1):nrow(dados_treinamento_sort), ]
+
+model <-  glm(IsBadBuy ~ . , family = binomial(link = "logit"),treino)
+
+p <- predict(model, teste, type = "response")
+
+Previsto <- ifelse(p < .5, 0, 1)
+
+Referencia <- teste$IsBadBuy
+
+confusionMatrix(table(Previsto, Referencia), positive = "1")
+
+
+
+ 
+```
+
+AUC de 0.75
+
+
+```{r}
+
+colAUC(p, teste$IsBadBuy, plotROC = TRUE )
+
+
+```
+
+
+Agora o glmnet, regressão logística que penaliza muitos parâmetros
+
+
+```{r}
+
+
+
+
+
+Folds <- createFolds(dados_treinamento$IsBadBuy, k = 5)
+
+Controle <- trainControl(
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  verboseIter = TRUE,
+  savePredictions = TRUE,
+  index = Folds
+)
+
+ model_glmnet <- train(
+   IsBadBuy ~ . , dados_treinamento,
+   metric = "ROC",
+   method = "glmnet",
+   tuneGrid = expand.grid(
+   alpha = 0:1,
+   lambda = 0:10/10
+ ),
+ trControl = Controle
+ )
+
+
+plot(model_glmnet)
+
+```
+
+
+
+```{r}
+
+model_glmnet
+
+
+```
+
+
+
+
+```{r}
+
+
+
+
+Folds <- createFolds(dados_treinamento$IsBadBuy, k = 5)
+
+Controle <- trainControl(
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  verboseIter = TRUE,
+  savePredictions = TRUE,
+  index = Folds
+)
+
+ model_glmnet_pre <- train(
+   IsBadBuy ~ . , dados_treinamento,
+   preProcess = c("center","scale"),
+   metric = "ROC",
+   method = "glmnet",
+   tuneGrid = expand.grid(
+   alpha = 0:1,
+   lambda = 0:10/10
+ ),
+ trControl = Controle
+ )
+
+
+plot(model_glmnet_pre)
+
+
+
+```
+
+
+
+```{r}
+
+model_glmnet_pre
+
+```
+
+
+
+```{r}
+
+
+Folds <- createFolds(dados_treinamento$IsBadBuy, k = 5)
+
+Controle <- trainControl(
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  verboseIter = TRUE,
+  savePredictions = TRUE,
+  index = Folds
+)
+
+ model_glmnet_pre_pca <- train(
+   IsBadBuy ~ . , dados_treinamento,
+   preProcess = c("center","scale","pca"),
+   metric = "ROC",
+   method = "glmnet",
+   tuneGrid = expand.grid(
+   alpha = 0:1,
+   lambda = 0:10/10
+ ),
+ trControl = Controle
+ )
+
+
+plot(model_glmnet_pre_pca)
+
+
+
+
+```
+
+
+
+```{r}
+
+model_glmnet_pre_pca
+
+
+```
+
+
+
